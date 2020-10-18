@@ -17,12 +17,12 @@ async function getTargetBranch(repo, branch) {
   }
 }
 
-async function getRepo(path, remote, branch) {
+async function getRepo(path, remote, branch, overrideModifiedTime) {
   // If the directory doesn't exist or is empty, clone. This will be the case if
   // our config has changed because Gatsby trashes the cache dir automatically
   // in that case.
   if (!fs.existsSync(path) || fs.readdirSync(path).length === 0) {
-    let opts = [`--depth`, `1`];
+    let opts = overrideModifiedTime ? [] : [`--depth`, `1`];
     if (typeof branch == `string`) {
       opts.push(`--branch`, branch);
     }
@@ -33,8 +33,8 @@ async function getRepo(path, remote, branch) {
     const target = await getTargetBranch(repo, branch);
     // Refresh our shallow clone with the latest commit.
     await repo
-      .fetch([`--depth`, `1`])
-      .then(() => repo.reset([`--hard`, target]));
+    .fetch(overrideModifiedTime ? [] : [`--depth`, `1`])
+    .then(() => repo.reset([`--hard`, target]));
     return repo;
   } else {
     throw new Error(`Can't clone to target destination: ${localPath}`);
@@ -42,27 +42,27 @@ async function getRepo(path, remote, branch) {
 }
 
 exports.sourceNodes = async (
-  {
-    actions: { createNode },
-    store,
-    createNodeId,
-    createContentDigest,
-    reporter
-  },
-  { name, remote, branch, patterns = `**`, local }
+    {
+      actions: { createNode },
+      store,
+      createNodeId,
+      createContentDigest,
+      reporter
+    },
+    { name, remote, branch, patterns = `**`, local, overrideModifiedTime }
 ) => {
   const programDir = store.getState().program.directory;
   const localPath = local || require("path").join(
-    programDir,
-    `.cache`,
-    `gatsby-source-git`,
-    name
+      programDir,
+      `.cache`,
+      `gatsby-source-git`,
+      name
   );
   const parsedRemote = GitUrlParse(remote);
 
   let repo;
   try {
-    repo = await getRepo(localPath, remote, branch);
+    repo = await getRepo(localPath, remote, branch, overrideModifiedTime);
   } catch (e) {
     return reporter.error(e);
   }
@@ -83,17 +83,17 @@ exports.sourceNodes = async (
   // Create a single graph node for this git remote.
   // Filenodes sourced from it will get a field pointing back to it.
   await createNode(
-    Object.assign(parsedRemote, {
-      id: remoteId,
-      sourceInstanceName: name,
-      parent: null,
-      children: [],
-      internal: {
-        type: `GitRemote`,
-        content: JSON.stringify(parsedRemote),
-        contentDigest: createContentDigest(parsedRemote)
-      }
-    })
+      Object.assign(parsedRemote, {
+        id: remoteId,
+        sourceInstanceName: name,
+        parent: null,
+        children: [],
+        internal: {
+          type: `GitRemote`,
+          content: JSON.stringify(parsedRemote),
+          contentDigest: createContentDigest(parsedRemote)
+        }
+      })
   );
 
   const createAndProcessNode = path => {
@@ -101,6 +101,24 @@ exports.sourceNodes = async (
       name: name,
       path: localPath
     }).then(fileNode => {
+      const relativePath = fileNode.relativePath;
+      return repo.log({
+        file: relativePath
+      })
+      .then(log => {
+        const latest = log.latest;
+        const {date, message, author_name} = latest;
+
+        if(overrideModifiedTime) {
+          fileNode.modifiedTime = new Date(Date.parse(date)).toISOString();
+        }
+
+        fileNode.message = message;
+        fileNode.authorName = author_name;
+        return fileNode;
+      });
+    })
+    .then(fileNode => {
       // Add a link to the git remote node
       fileNode.gitRemote___NODE = remoteId;
       // Then create the node, as if it were created by the gatsby-source
